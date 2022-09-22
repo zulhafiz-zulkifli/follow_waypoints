@@ -6,6 +6,8 @@ import time
 import actionlib
 import rospy
 import tf
+import tf2_ros
+import math
 from actionlib_msgs.msg import GoalID
 from dynamic_reconfigure.server import Server as DynServer
 from follow_waypoints.cfg import FollowWaypointsConfig
@@ -30,13 +32,11 @@ class Commander(object):
         # Read parameters off the parameter server --------------------------------------------
         self.frame_id = rospy.get_param("goal_frame_id", "map")
         self.odom_frame_id = rospy.get_param("odom_frame_id", "odom")
-        self.base_frame_id = rospy.get_param("base_frame_id", "base_footprint")
+        self.base_frame_id = rospy.get_param("base_frame_id", "base_link")
         self.wait_duration = rospy.get_param("wait_duration", 0.0)
-        self.distance_tolerance = rospy.get_param("waypoint_distance_tolerance", 0.0)
+        self.distance_tolerance = rospy.get_param("waypoint_distance_tolerance", 0.3)
 
-        self.waypoints_to_follow_topic = rospy.get_param(
-            "waypoints_to_follow_topic", "/initialpose"
-        )
+        self.waypoints_to_follow_topic = rospy.get_param("waypoints_to_follow_topic", "/initialpose")
         self.waypoints_list_topic = rospy.get_param("waypoints_list_topic", "/waypoints")
 
         # listen to points or to poses?
@@ -59,8 +59,8 @@ class Commander(object):
         info("Connected to move_base.")
 
         # TF Initialisation -------------------------------------------------------------------
-        self.tf = tf.TransformListener()
-        self.listener = tf.TransformListener()
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
         # Subscribers & Publishers & Services initialisation ----------------------------------
         self.path_ready_srv = rospy.Service("path_ready", Trigger, self.make_path_ready)
@@ -172,29 +172,15 @@ class Commander(object):
                 self.waypoints.popleft()
             self.send_move_base_goal(goal)
 
-            if not self.distance_tolerance > 0.0:
-                # just wait until move_base reaches the goal...
-                self.move_base_client.wait_for_result()
-                info("Waiting for %f seconds before proceeding to the next goal..." % self.wait_duration)
-                time.sleep(self.wait_duration)
-            else:
-                raise NotImplementedError("distance_tolerance not implemented yet.")
-
-                # # TODO - Rewrite
-                # # This is the loop which exist when the robot is near a certain GOAL point.
-                # distance = 10
-                # while distance > self.distance_tolerance:
-                #     now = rospy.Time.now()
-                #     self.listener.waitForTransform(
-                #         self.odom_frame_id, self.base_frame_id, now, rospy.Duration(4.0)
-                #     )
-                #     trans, rot = self.listener.lookupTransform(
-                #         self.odom_frame_id, self.base_frame_id, now
-                #     )
-                #     distance = math.sqrt(
-                #         pow(goal.pose.pose.position.x - trans[0], 2)
-                #         + pow(goal.pose.pose.position.y - trans[1], 2)
-                #     )
+            distance = 10
+            while distance > 0.3:
+                #print('start listening....')
+                tff = self.listenTransform('map', 'base_link')
+                #print('stop listening!')
+                tfx = tff[0][0]
+                tfy = tff[0][1]
+                distance = math.sqrt(pow(goal.pose.pose.position.x - tfx, 2) + pow(goal.pose.pose.position.y - tfy, 2))
+                print(distance)
 
             # current waypoint has now been reached! move on to the next waypoint on the next
             # iteration
@@ -203,6 +189,25 @@ class Commander(object):
     def run(self):
         while not rospy.is_shutdown():
             self.run_once()
+
+        # listen to transform from source to target frame
+    def listenTransform(self, source, target):
+        trans = [0, 0, 0]
+        rot = [0, 0 ,0]
+        found = False
+        while not found:
+            try:
+                tff = self.tfBuffer.lookup_transform(source, target, rospy.Time())
+                trans[0] = tff.transform.translation.x
+                trans[1] = tff.transform.translation.y
+                trans[2] = tff.transform.translation.z
+                quat = [tff.transform.rotation.x, tff.transform.rotation.y, tff.transform.rotation.z, tff.transform.rotation.w]
+                (rot[0], rot[1], rot[2]) = tf.transformations.euler_from_quaternion(quat)
+                found = True
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                print("TF NOT FOUND?!")
+                pass
+        return [trans,rot]
 
 
 # helper methods
